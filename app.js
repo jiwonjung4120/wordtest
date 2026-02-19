@@ -201,6 +201,40 @@ function wireTabs(){
 // TTS (en-US)
 // =========================
 let ttsVoice = null;
+let ttsUnlocked = false;
+let autoNextTimer = null;
+
+function clearAutoNext(){
+  if(autoNextTimer){
+    clearTimeout(autoNextTimer);
+    autoNextTimer = null;
+  }
+}
+
+// Mobile(특히 Android Chrome/PWA)에서는 TTS가 "사용자 제스처 이후"에만 재생되거나
+// 첫 호출이 무시되는 경우가 있어, 첫 터치/클릭에서 한 번 unlock을 시도한다.
+function unlockTTSOnce(){
+  if(ttsUnlocked) return;
+  if(!('speechSynthesis' in window)) return;
+  try{
+    speechSynthesis.cancel();
+    speechSynthesis.resume();
+    const u = new SpeechSynthesisUtterance(' ');
+    u.volume = 0; // 무음
+    u.rate = 1;
+    u.lang = 'en-US';
+    u.onend = () => { ttsUnlocked = true; };
+    u.onerror = () => { ttsUnlocked = true; };
+    speechSynthesis.speak(u);
+    // 일부 기기에서 onend가 안 뜨는 경우 대비
+    setTimeout(() => {
+      try{ speechSynthesis.cancel(); }catch{}
+      ttsUnlocked = true;
+    }, 300);
+  }catch(e){
+    ttsUnlocked = true;
+  }
+}
 
 function pickEnUSVoice(){
   const voices = speechSynthesis.getVoices();
@@ -219,14 +253,23 @@ function speakWord(word){
   if(!word) return;
   if(!("speechSynthesis" in window)) return;
 
+  // 모바일 첫 재생 안정화
+  unlockTTSOnce();
+
   try{
+    // Android에서 cancel 직후 speak가 무시되는 경우가 있어 resume + 짧은 지연
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(word);
+    speechSynthesis.resume();
+
     if(!ttsVoice) ttsVoice = pickEnUSVoice();
+    const u = new SpeechSynthesisUtterance(word);
     if(ttsVoice) u.voice = ttsVoice;
     u.lang = (ttsVoice && ttsVoice.lang) ? ttsVoice.lang : "en-US";
     u.rate = Number(settings.ttsRate || 1.0);
-    speechSynthesis.speak(u);
+
+    setTimeout(() => {
+      try{ speechSynthesis.speak(u); }catch(e){ console.warn('TTS speak failed:', e); }
+    }, 80);
   }catch(e){
     console.warn("TTS failed:", e);
   }
@@ -238,6 +281,9 @@ function initTTS(){
   const tryPick = () => { ttsVoice = pickEnUSVoice(); };
   tryPick();
   speechSynthesis.onvoiceschanged = () => tryPick();
+
+  // 사용자 입력 시점에 unlock (모바일 TTS 안정화)
+  window.addEventListener('pointerdown', unlockTTSOnce, { once: true });
 }
 
 // =========================
@@ -430,9 +476,18 @@ function chooseAnswer(chosenMeaning){
   );
   updateRunUI(run);
   renderWrongList();
+
+  // ✅ 뜻(보기)을 선택하면 자동으로 다음 단어로 이동
+  // (정답/오답 표시가 잠깐 보이도록 아주 짧게 지연)
+  clearAutoNext();
+  autoNextTimer = setTimeout(() => {
+    autoNextTimer = null;
+    nextQuestion();
+  }, 450);
 }
 
 function nextQuestion(){
+  clearAutoNext();
   const run = loadRun();
   if(!run) return;
 
@@ -683,7 +738,13 @@ function updateRunUI(run){
     el("wrongCnt").textContent = "0";
     return;
   }
-  el("runId").textContent = run.runId;
+  // 회차 표시를 보기 좋게(타임스탬프 숫자 대신 날짜/시간)
+  try{
+    const dt = new Date(run.createdAt);
+    el("runId").textContent = `RUN · ${dt.toLocaleString()}`;
+  }catch{
+    el("runId").textContent = run.runId;
+  }
   el("progress").textContent = `${Math.min(run.idx+1, run.countActual)} / ${run.countActual}`;
   el("correctCnt").textContent = String(run.correct);
   el("wrongCnt").textContent = String(run.wrong);
@@ -693,12 +754,14 @@ function updateRunUI(run){
 
 function wireQuizButtons(){
   el("startBtn").addEventListener("click", () => {
+    unlockTTSOnce();
     const s = loadSettings();
     newRun(Number(s.count), s.scope);
     el("runReport").hidden = true;
   });
 
   el("resumeBtn").addEventListener("click", () => {
+    unlockTTSOnce();
     const run = loadRun();
     if(!run) return;
     renderQuestion(run);
@@ -720,6 +783,7 @@ function wireQuizButtons(){
   });
 
   el("speakBtn").addEventListener("click", () => {
+    unlockTTSOnce();
     const run = loadRun();
     if(!run) return;
     const item = currentItem(run);
