@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Random Word Quiz</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <meta name="theme-color" content="#0b1220" />
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">RWQ</div>
+      <div>
+        <div class="title">Random Word Quiz</div>
+        <div class="sub" id="dbStats">DB: 0개</div>
+      </div>
+    </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="quiz">퀴즈</button>
+      <button class="tab" data-tab="add">단어추가</button>
+      <button class="tab" data-tab="list">단어리스트</button>
+      <button class="tab" data-tab="wrong">오답노트</button>
+      <button class="tab" data-tab="backup">백업</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <!-- QUIZ -->
+    <section class="panel show" id="tab-quiz">
+      <div class="grid2">
+        <div class="card">
+          <h2>퀴즈 설정</h2>
+
+          <div class="row">
+            <label>문항 수</label>
+            <div class="seg" id="countSeg">
+              <button class="segbtn active" data-count="100">100</button>
+              <button class="segbtn" data-count="200">200</button>
+              <button class="segbtn" data-count="300">300</button>
+              <button class="segbtn" data-count="400">400</button>
+              <button class="segbtn" data-count="500">500</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>출제 범위</label>
+            <select id="scopeSelect">
+              <option value="all">전체</option>
+              <option value="exam">시험용(단일 단어 위주)</option>
+              <option value="example">예문용(구/표현/숙어/접속사구)</option>
+              <option value="wrongOnly">오답만(누적 오답)</option>
+            </select>
+          </div>
+
+          <div class="row">
+            <label>발음(미국식)</label>
+            <div class="inline">
+              <label class="switch">
+                <input type="checkbox" id="ttsToggle" checked />
+                <span class="slider"></span>
+              </label>
+              <span class="hint">단어가 뜨면 자동으로 읽음</span>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>속도</label>
+            <div class="inline">
+              <input id="ttsRate" type="range" min="0.7" max="1.2" step="0.05" value="1" />
+              <span class="mono" id="ttsRateVal">1.00</span>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn primary" id="startBtn">시작</button>
+            <button class="btn" id="resumeBtn" disabled>이어서</button>
+            <button class="btn danger" id="resetRunBtn">현재 회차 초기화</button>
+          </div>
+
+          <div class="note">
+            - 정답 클릭 → 즉시 다음 문제<br/>
+            - <b>뜻(정답)</b>을 클릭해도 즉시 다음 문제로 넘어감(요청 반영)<br/>
+            - “모르겠음” 포함
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>진행</h2>
+          <div class="statgrid">
+            <div class="stat">
+              <div class="k">회차</div>
+              <div class="v" id="runId">-</div>
+            </div>
+            <div class="stat">
+              <div class="k">진행</div>
+              <div class="v" id="progress">0 / 0</div>
+            </div>
+            <div class="stat">
+              <div class="k">정답</div>
+              <div class="v" id="correctCnt">0</div>
+            </div>
+            <div class="stat">
+              <div class="k">오답</div>
+              <div class="v" id="wrongCnt">0</div>
+            </div>
+          </div>
+
+          <div class="quizbox" id="quizBox">
+            <div class="qword" id="qWord">시작을 누르세요</div>
+
+            <div class="choices" id="choices"></div>
+
+            <div class="reveal" id="revealBox" hidden>
+              <div class="revealLine">
+                <span class="badge" id="revealBadge">정답</span>
+                <button class="revealMeaning" id="revealMeaning" title="클릭하면 다음 문제로 이동"></button>
+              </div>
+              <div class="revealMeta">
+                <span class="muted" id="revealMeta"></span>
+                <button class="mini" id="speakBtn">🔊 다시 듣기</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn" id="skipBtn">모르겠음</button>
+            <button class="btn" id="finishBtn" disabled>테스트 종료</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>이번 회차 결과</h2>
+        <div class="inline">
+          <button class="btn" id="showRunReportBtn">결과 보기</button>
+          <button class="btn" id="exportRunBtn">이번 회차 결과 내보내기(JSON)</button>
+        </div>
+        <div id="runReport" class="report" hidden></div>
+      </div>
+    </section>
+
+    <!-- ADD -->
+    <section class="panel" id="tab-add">
+      <div class="card">
+        <h2>단어 추가(확장용)</h2>
+        <div class="note">
+          아래 입력칸에 아무거나 붙여넣어도 됨:
+          <ul>
+            <li><b>CSV</b>: <span class="mono">word,meaning</span></li>
+            <li><b>배열</b>: <span class="mono">["word","meaning"], ["word2","meaning2"]</span></li>
+          </ul>
+        </div>
+
+        <textarea id="addInput" placeholder='예) word,meaning&#10;embarrassed,당황한&#10;&#10;또는&#10;["embarrassed","당황한"], ["hurriedly","급히"]'></textarea>
+
+        <div class="inline">
+          <button class="btn primary" id="addBtn">단어 추가</button>
+          <button class="btn" id="clearAddBtn">입력 지우기</button>
+          <div class="muted" id="addResult"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LIST -->
+    <section class="panel" id="tab-list">
+      <div class="card">
+        <h2>단어 리스트</h2>
+        <div class="grid2">
+          <div class="row">
+            <label>검색</label>
+            <input id="listSearch" placeholder="영단어/뜻 검색" />
+          </div>
+          <div class="row">
+            <label>필터</label>
+            <select id="listFilter">
+              <option value="all">전체</option>
+              <option value="exam">시험용</option>
+              <option value="example">예문용</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="inline">
+          <button class="btn" id="exportWordsBtn">단어DB 내보내기(JSON)</button>
+          <button class="btn danger" id="wipeWordsBtn">단어DB 초기화(주의)</button>
+        </div>
+
+        <div id="wordList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- WRONG -->
+    <section class="panel" id="tab-wrong">
+      <div class="card">
+        <h2>오답노트(누적)</h2>
+        <div class="grid2">
+          <div class="row">
+            <label>검색</label>
+            <input id="wrongSearch" placeholder="영단어/뜻 검색" />
+          </div>
+          <div class="row">
+            <label>정렬</label>
+            <select id="wrongSort">
+              <option value="countDesc">오답 횟수 많은 순</option>
+              <option value="recentDesc">최근 오답 순</option>
+              <option value="alphaAsc">알파벳 순</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="inline">
+          <button class="btn" id="exportWrongBtn">오답노트 내보내기(JSON)</button>
+          <button class="btn danger" id="wipeWrongBtn">오답노트 초기화(주의)</button>
+        </div>
+
+        <div id="wrongList" class="list"></div>
+      </div>
+    </section>
+
+    <!-- BACKUP -->
+    <section class="panel" id="tab-backup">
+      <div class="card">
+        <h2>백업/복원</h2>
+        <div class="note">
+          폰 바꾸거나 브라우저 데이터 날아가도 유지하려면 여기서 <b>내보내기</b> 해서 파일로 보관해두면 됨.
+        </div>
+
+        <div class="inline">
+          <button class="btn primary" id="exportAllBtn">전체 백업 내보내기(JSON)</button>
+          <label class="btn filebtn">
+            백업 가져오기(JSON)
+            <input type="file" id="importFile" accept="application/json" hidden />
+          </label>
+        </div>
+
+        <div class="note" id="backupMsg"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span class="muted">PWA 지원 · 오프라인 캐시 · 로컬 저장</span>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

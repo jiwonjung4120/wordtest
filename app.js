@@ -1,0 +1,882 @@
+// =========================
+// Storage Keys
+// =========================
+const KEY_DB = "rwq_db_v1";           // words
+const KEY_WRONG = "rwq_wrong_v1";     // wrong notes
+const KEY_RUN = "rwq_run_v1";         // current run state
+const KEY_SETTINGS = "rwq_settings_v1";
+
+// =========================
+// Helpers
+// =========================
+const el = (id) => document.getElementById(id);
+const now = () => new Date().toISOString();
+const uid = () => Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
+
+function safeJsonParse(s, fallback){
+  try { return JSON.parse(s); } catch { return fallback; }
+}
+
+function downloadJson(filename, obj){
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function normalizeWord(w){
+  return (w || "").trim();
+}
+
+function lowerKey(w){
+  return normalizeWord(w).toLowerCase();
+}
+
+// =========================
+// Tagging (시험용/예문용 자동 구분)
+// =========================
+// - 예문용: 공백 포함(phrase), 접속사구/전치사구 느낌(단어 2개 이상), 기호 포함
+// - 시험용: 단일 단어 위주
+function detectTag(word){
+  const w = normalizeWord(word);
+  if(!w) return "exam";
+  const hasSpace = /\s/.test(w);
+  const hasPunct = /[~()\/.,;:!?'"-]/.test(w);
+  // 접속사구/표현으로 자주 나오는 패턴(확장 가능)
+  const looksLikePhrase = hasSpace || hasPunct || /^(because of|due to|owing to|even though|although|in spite of|as soon as|by the time|the moment|as long as|provided that|considering that|given that|seeing that|when in fact|when actually|when the fact is|even if)\b/i.test(w);
+  return looksLikePhrase ? "example" : "exam";
+}
+
+// =========================
+// DB load/save
+// =========================
+function loadDB(){
+  const db = safeJsonParse(localStorage.getItem(KEY_DB), null);
+  if(db && Array.isArray(db.items)) return db;
+  return { version: 1, items: [] };
+}
+function saveDB(db){
+  localStorage.setItem(KEY_DB, JSON.stringify(db));
+}
+
+function loadWrong(){
+  const w = safeJsonParse(localStorage.getItem(KEY_WRONG), null);
+  if(w && w.map) return w;
+  return { version: 1, map: {} }; // map[wordLower] = {word, meaning, wrongCount, lastWrongAt, sessions:[runId...]}
+}
+function saveWrong(w){
+  localStorage.setItem(KEY_WRONG, JSON.stringify(w));
+}
+
+function loadRun(){
+  return safeJsonParse(localStorage.getItem(KEY_RUN), null);
+}
+function saveRun(run){
+  localStorage.setItem(KEY_RUN, JSON.stringify(run));
+}
+function clearRun(){
+  localStorage.removeItem(KEY_RUN);
+}
+
+function loadSettings(){
+  const s = safeJsonParse(localStorage.getItem(KEY_SETTINGS), null);
+  return s || { ttsOn: true, ttsRate: 1.0, count: 100, scope: "all" };
+}
+function saveSettings(s){
+  localStorage.setItem(KEY_SETTINGS, JSON.stringify(s));
+}
+
+// =========================
+// Seed load (words.seed.json)
+// =========================
+async function seedIfEmpty(){
+  // ✅ 이제부터는 "비어있을 때만"이 아니라,
+  // seed를 매번 읽어서 DB에 없는 단어만 병합 추가한다.
+  try{
+    const resp = await fetch("./words.seed.json", { cache: "no-store" });
+    if(!resp.ok) throw new Error("seed fetch failed: " + resp.status);
+
+    const js = await resp.json();
+    const pairs = Array.isArray(js.pairs) ? js.pairs : [];
+    if(!pairs.length) return;
+
+    const added = addPairsToDB(pairs, "seed");
+    console.log("Seed merged. added:", added);
+  }catch(e){
+    console.warn("Seed load skipped:", e);
+  }
+}
+
+function addPairsToDB(pairs, source="manual"){
+  const db = loadDB();
+  const existing = new Set(db.items.map(x => lowerKey(x.word)));
+  let added = 0;
+
+  for(const p of pairs){
+    if(!Array.isArray(p) || p.length < 1) continue;
+    const word = normalizeWord(p[0]);
+    const meaning = normalizeWord(p[1] || "");
+    if(!word) continue;
+    const k = lowerKey(word);
+    if(existing.has(k)) continue;
+
+    db.items.push({
+      id: uid(),
+      word,
+      meaning,
+      tag: detectTag(word),
+      createdAt: now(),
+      source
+    });
+    existing.add(k);
+    added++;
+  }
+
+  saveDB(db);
+  refreshHeader();
+  renderWordList();
+  renderWrongList();
+  return added;
+}
+
+// =========================
+// Input parsers (CSV or ["w","m"] pairs)
+// =========================
+function parseCSVLines(text){
+  // CSV: word,meaning
+  const lines = (text || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const out = [];
+  for(const line of lines){
+    if(/^word\s*,\s*meaning$/i.test(line)) continue;
+    const parts = line.split(",");
+    if(parts.length < 1) continue;
+    const word = normalizeWord(parts[0]);
+    const meaning = normalizeWord(parts.slice(1).join(","));
+    if(word) out.push([word, meaning]);
+  }
+  return out;
+}
+
+function parsePairsArray(text){
+  // ["word","meaning"], ["word2","meaning2"]
+  const out = [];
+  const re = /\[\s*"([^"]+)"\s*,\s*"([^"]*)"\s*\]/g;
+  let m;
+  while((m = re.exec(text)) !== null){
+    const w = normalizeWord(m[1]);
+    const meaning = normalizeWord(m[2] || "");
+    if(w) out.push([w, meaning]);
+  }
+  return out;
+}
+
+function parseAnyToPairs(text){
+  const csv = parseCSVLines(text);
+  if(csv.length) return csv;
+  const pairs = parsePairsArray(text);
+  if(pairs.length) return pairs;
+  return [];
+}
+
+// =========================
+// UI: Tabs
+// =========================
+function setTab(name){
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  document.querySelectorAll(".panel").forEach(p => p.classList.remove("show"));
+  el(`tab-${name}`).classList.add("show");
+}
+
+function wireTabs(){
+  document.querySelectorAll(".tab").forEach(b => {
+    b.addEventListener("click", () => setTab(b.dataset.tab));
+  });
+}
+
+// =========================
+// TTS (en-US)
+// =========================
+let ttsVoice = null;
+
+function pickEnUSVoice(){
+  const voices = speechSynthesis.getVoices();
+  if(!voices || !voices.length) return null;
+
+  // 1) en-US 우선
+  let v = voices.find(v => (v.lang || "").toLowerCase().startsWith("en-us"));
+  // 2) en 전체 fallback
+  if(!v) v = voices.find(v => (v.lang || "").toLowerCase().startsWith("en"));
+  return v || null;
+}
+
+function speakWord(word){
+  const settings = loadSettings();
+  if(!settings.ttsOn) return;
+  if(!word) return;
+  if(!("speechSynthesis" in window)) return;
+
+  try{
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(word);
+    if(!ttsVoice) ttsVoice = pickEnUSVoice();
+    if(ttsVoice) u.voice = ttsVoice;
+    u.lang = (ttsVoice && ttsVoice.lang) ? ttsVoice.lang : "en-US";
+    u.rate = Number(settings.ttsRate || 1.0);
+    speechSynthesis.speak(u);
+  }catch(e){
+    console.warn("TTS failed:", e);
+  }
+}
+
+function initTTS(){
+  if(!("speechSynthesis" in window)) return;
+  // voices 로딩 타이밍 이슈 대응
+  const tryPick = () => { ttsVoice = pickEnUSVoice(); };
+  tryPick();
+  speechSynthesis.onvoiceschanged = () => tryPick();
+}
+
+// =========================
+// Quiz Engine
+// =========================
+function sample(arr, n){
+  const a = arr.slice();
+  for(let i=a.length-1; i>0; i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, Math.min(n, a.length));
+}
+
+function buildQuestionPool(scope, count){
+  const db = loadDB();
+  const wrong = loadWrong();
+
+  let base = db.items;
+
+  if(scope === "exam") base = base.filter(x => x.tag === "exam");
+  if(scope === "example") base = base.filter(x => x.tag === "example");
+  if(scope === "wrongOnly"){
+    const keys = new Set(Object.keys(wrong.map || {}));
+    base = base.filter(x => keys.has(lowerKey(x.word)));
+  }
+
+  return sample(base, count);
+}
+
+function pickChoices(correctItem, allItems){
+  // 4지선다: meaning 기준 (뜻 3개 랜덤 + 정답)
+  const correct = correctItem.meaning || "(뜻 없음)";
+  const pool = allItems.filter(x => lowerKey(x.word) !== lowerKey(correctItem.word));
+  const distractors = sample(pool, 3).map(x => x.meaning || "(뜻 없음)");
+  const options = [correct, ...distractors];
+
+  // shuffle
+  for(let i=options.length-1; i>0; i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [options[i], options[j]] = [options[j], options[i]];
+  }
+  return { options, correct };
+}
+
+function newRun(count, scope){
+  const db = loadDB();
+  const pool = buildQuestionPool(scope, count);
+
+  const run = {
+    runId: "RUN-" + Date.now(),
+    createdAt: now(),
+    countRequested: count,
+    scope,
+    idx: 0,
+    correct: 0,
+    wrong: 0,
+    pool: pool.map(x => x.id),
+    answers: [] // {wordId, word, correctMeaning, chosenMeaning, isCorrect, ts}
+  };
+
+  // 최소 방어: 풀 부족하면 count 줄어듦
+  run.countActual = pool.length;
+
+  saveRun(run);
+  updateRunUI(run);
+  renderQuestion(run);
+}
+
+function getItemById(id){
+  const db = loadDB();
+  return db.items.find(x => x.id === id) || null;
+}
+
+function currentItem(run){
+  const id = run.pool[run.idx];
+  return id ? getItemById(id) : null;
+}
+
+function setReveal(isCorrect, correctMeaning, metaText){
+  const badge = el("revealBadge");
+  badge.textContent = isCorrect ? "정답" : "오답";
+  badge.classList.toggle("wrong", !isCorrect);
+
+  el("revealMeaning").textContent = correctMeaning;
+  el("revealMeta").textContent = metaText || "";
+  el("revealBox").hidden = false;
+}
+
+function clearReveal(){
+  el("revealBox").hidden = true;
+  el("revealMeaning").textContent = "";
+  el("revealMeta").textContent = "";
+}
+
+function lockChoices(){
+  document.querySelectorAll(".choice").forEach(b => b.classList.add("disabled"));
+}
+
+function renderQuestion(run){
+  clearReveal();
+  const item = currentItem(run);
+  const db = loadDB();
+
+  if(!item){
+    el("qWord").textContent = "끝!";
+    el("choices").innerHTML = "";
+    el("finishBtn").disabled = false;
+    updateRunUI(run);
+    return;
+  }
+
+  el("qWord").textContent = item.word;
+  speakWord(item.word);
+
+  const { options, correct } = pickChoices(item, db.items);
+
+  const wrap = el("choices");
+  wrap.innerHTML = "";
+
+  options.forEach((meaning, i) => {
+    const btn = document.createElement("button");
+    btn.className = "choice";
+    btn.innerHTML = `<span>${meaning}</span><span class="tag">${i+1}</span>`;
+    btn.addEventListener("click", () => chooseAnswer(meaning));
+    wrap.appendChild(btn);
+  });
+
+  el("finishBtn").disabled = false;
+  updateRunUI(run);
+}
+
+function chooseAnswer(chosenMeaning){
+  const run = loadRun();
+  if(!run) return;
+
+  const item = currentItem(run);
+  if(!item) return;
+
+  const correctMeaning = item.meaning || "(뜻 없음)";
+  const isCorrect = (normalizeWord(chosenMeaning) === normalizeWord(correctMeaning));
+
+  // mark buttons
+  document.querySelectorAll(".choice").forEach(btn => {
+    const txt = btn.textContent.replace(/\s*\d+\s*$/, "").trim();
+    if(txt === correctMeaning) btn.classList.add("correct");
+    if(txt === chosenMeaning && !isCorrect) btn.classList.add("wrong");
+  });
+  lockChoices();
+
+  run.answers.push({
+    wordId: item.id,
+    word: item.word,
+    correctMeaning,
+    chosenMeaning,
+    isCorrect,
+    ts: now()
+  });
+
+  if(isCorrect) run.correct++;
+  else run.wrong++;
+
+  // 누적 오답 기록
+  if(!isCorrect){
+    const wrong = loadWrong();
+    const k = lowerKey(item.word);
+    if(!wrong.map[k]){
+      wrong.map[k] = {
+        word: item.word,
+        meaning: correctMeaning,
+        wrongCount: 0,
+        lastWrongAt: null,
+        sessions: []
+      };
+    }
+    wrong.map[k].wrongCount += 1;
+    wrong.map[k].lastWrongAt = now();
+    if(!wrong.map[k].sessions.includes(run.runId)) wrong.map[k].sessions.push(run.runId);
+    saveWrong(wrong);
+  }
+
+  saveRun(run);
+
+  // ✅ 요구사항: "뜻을 클릭하면 다음 단어로 자동"
+  // -> 정답/오답 보여주고, 뜻 버튼 누르면 nextQuestion()
+  setReveal(
+    isCorrect,
+    correctMeaning,
+    `${item.tag === "exam" ? "시험용" : "예문용"} · ${run.idx+1}/${run.countActual}`
+  );
+  updateRunUI(run);
+  renderWrongList();
+}
+
+function nextQuestion(){
+  const run = loadRun();
+  if(!run) return;
+
+  run.idx += 1;
+  saveRun(run);
+  updateRunUI(run);
+  renderQuestion(run);
+}
+
+function markDontKnow(){
+  // 모르겠음 = 오답 처리
+  const run = loadRun();
+  if(!run) return;
+
+  const item = currentItem(run);
+  if(!item) return;
+
+  chooseAnswer("모르겠음"); // 의도적으로 정답과 불일치
+}
+
+function finishRun(){
+  const run = loadRun();
+  if(!run) return;
+  // 끝까지 갔든, 중간 종료든 결과 표시
+  showRunReport();
+}
+
+function resetCurrentRun(){
+  clearRun();
+  updateRunUI(null);
+  el("qWord").textContent = "시작을 누르세요";
+  el("choices").innerHTML = "";
+  clearReveal();
+  el("finishBtn").disabled = true;
+  el("resumeBtn").disabled = true;
+  el("runReport").hidden = true;
+}
+
+// =========================
+// Reports
+// =========================
+function showRunReport(){
+  const run = loadRun();
+  if(!run) return;
+
+  const box = el("runReport");
+  box.hidden = false;
+
+  const rows = run.answers.map((a, idx) => {
+    const ok = a.isCorrect;
+    return `
+      <tr>
+        <td>${idx+1}</td>
+        <td><b>${escapeHtml(a.word)}</b></td>
+        <td>${escapeHtml(a.correctMeaning)}</td>
+        <td>${escapeHtml(a.chosenMeaning)}</td>
+        <td class="${ok ? "good" : "bad"}">${ok ? "O" : "X"}</td>
+      </tr>
+    `;
+  }).join("");
+
+  box.innerHTML = `
+    <div class="inline" style="justify-content:space-between; margin-bottom:10px;">
+      <div>
+        <div><b>${run.runId}</b></div>
+        <div class="muted">${run.scope} · ${run.countActual}문항 · 정답 ${run.correct} / 오답 ${run.wrong}</div>
+      </div>
+    </div>
+    <div class="reportTable">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>단어</th><th>정답</th><th>선택</th><th>결과</th>
+          </tr>
+        </thead>
+        <tbody>${rows || ""}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function escapeHtml(s){
+  return String(s ?? "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+// =========================
+// Word list + Wrong list
+// =========================
+function refreshHeader(){
+  const db = loadDB();
+  const exam = db.items.filter(x => x.tag === "exam").length;
+  const example = db.items.filter(x => x.tag === "example").length;
+  el("dbStats").textContent = `DB: ${db.items.length}개 (시험용 ${exam} / 예문용 ${example})`;
+}
+
+function renderWordList(){
+  const db = loadDB();
+  const q = (el("listSearch")?.value || "").trim().toLowerCase();
+  const filter = el("listFilter")?.value || "all";
+
+  let items = db.items.slice();
+  if(filter === "exam") items = items.filter(x => x.tag === "exam");
+  if(filter === "example") items = items.filter(x => x.tag === "example");
+
+  if(q){
+    items = items.filter(x =>
+      (x.word || "").toLowerCase().includes(q) ||
+      (x.meaning || "").toLowerCase().includes(q)
+    );
+  }
+
+  const wrap = el("wordList");
+  wrap.innerHTML = "";
+
+  if(!items.length){
+    wrap.innerHTML = `<div class="muted">표시할 단어가 없습니다.</div>`;
+    return;
+  }
+
+  items
+    .sort((a,b) => a.word.localeCompare(b.word))
+    .slice(0, 1500) // 너무 많아지면 렌더 부담 방지
+    .forEach(item => {
+      const div = document.createElement("div");
+      div.className = "item";
+      div.innerHTML = `
+        <div>
+          <div class="w">${escapeHtml(item.word)}</div>
+          <div class="m">${escapeHtml(item.meaning || "")}</div>
+          <div class="meta">${escapeHtml(item.tag)} · ${escapeHtml(item.source || "")}</div>
+        </div>
+        <div class="right">
+          <span class="pill">${item.tag === "exam" ? "시험용" : "예문용"}</span>
+          <button class="mini" title="발음" data-say="${escapeHtml(item.word)}">🔊</button>
+        </div>
+      `;
+      div.querySelector("button[data-say]").addEventListener("click", () => speakWord(item.word));
+      wrap.appendChild(div);
+    });
+}
+
+function renderWrongList(){
+  const wrong = loadWrong();
+  const q = (el("wrongSearch")?.value || "").trim().toLowerCase();
+  const sort = el("wrongSort")?.value || "countDesc";
+
+  let items = Object.values(wrong.map || {});
+
+  if(q){
+    items = items.filter(x =>
+      (x.word || "").toLowerCase().includes(q) ||
+      (x.meaning || "").toLowerCase().includes(q)
+    );
+  }
+
+  if(sort === "countDesc") items.sort((a,b) => (b.wrongCount||0)-(a.wrongCount||0));
+  if(sort === "recentDesc") items.sort((a,b) => String(b.lastWrongAt||"").localeCompare(String(a.lastWrongAt||"")));
+  if(sort === "alphaAsc") items.sort((a,b) => (a.word||"").localeCompare(b.word||""));
+
+  const wrap = el("wrongList");
+  wrap.innerHTML = "";
+
+  if(!items.length){
+    wrap.innerHTML = `<div class="muted">오답 기록이 없습니다.</div>`;
+    return;
+  }
+
+  items.forEach(x => {
+    const div = document.createElement("div");
+    div.className = "item";
+    div.innerHTML = `
+      <div>
+        <div class="w">${escapeHtml(x.word)}</div>
+        <div class="m">${escapeHtml(x.meaning || "")}</div>
+        <div class="meta">오답 ${x.wrongCount}회 · 최근 ${escapeHtml(x.lastWrongAt || "-")} · 회차 ${escapeHtml((x.sessions||[]).length)}</div>
+      </div>
+      <div class="right">
+        <span class="pill">오답 ${x.wrongCount}</span>
+        <button class="mini" title="발음">🔊</button>
+      </div>
+    `;
+    div.querySelector("button.mini").addEventListener("click", () => speakWord(x.word));
+    wrap.appendChild(div);
+  });
+}
+
+// =========================
+// Settings UI
+// =========================
+function applySettingsToUI(){
+  const s = loadSettings();
+
+  // count seg
+  document.querySelectorAll("#countSeg .segbtn").forEach(b => {
+    b.classList.toggle("active", Number(b.dataset.count) === Number(s.count));
+  });
+
+  el("scopeSelect").value = s.scope || "all";
+  el("ttsToggle").checked = !!s.ttsOn;
+
+  el("ttsRate").value = String(s.ttsRate ?? 1.0);
+  el("ttsRateVal").textContent = Number(s.ttsRate ?? 1.0).toFixed(2);
+}
+
+function wireSettings(){
+  document.querySelectorAll("#countSeg .segbtn").forEach(b => {
+    b.addEventListener("click", () => {
+      const s = loadSettings();
+      s.count = Number(b.dataset.count);
+      saveSettings(s);
+      applySettingsToUI();
+    });
+  });
+
+  el("scopeSelect").addEventListener("change", () => {
+    const s = loadSettings();
+    s.scope = el("scopeSelect").value;
+    saveSettings(s);
+  });
+
+  el("ttsToggle").addEventListener("change", () => {
+    const s = loadSettings();
+    s.ttsOn = el("ttsToggle").checked;
+    saveSettings(s);
+  });
+
+  el("ttsRate").addEventListener("input", () => {
+    const s = loadSettings();
+    s.ttsRate = Number(el("ttsRate").value);
+    saveSettings(s);
+    el("ttsRateVal").textContent = Number(s.ttsRate).toFixed(2);
+  });
+}
+
+// =========================
+// Run UI
+// =========================
+function updateRunUI(run){
+  if(!run){
+    el("runId").textContent = "-";
+    el("progress").textContent = "0 / 0";
+    el("correctCnt").textContent = "0";
+    el("wrongCnt").textContent = "0";
+    return;
+  }
+  el("runId").textContent = run.runId;
+  el("progress").textContent = `${Math.min(run.idx+1, run.countActual)} / ${run.countActual}`;
+  el("correctCnt").textContent = String(run.correct);
+  el("wrongCnt").textContent = String(run.wrong);
+
+  el("resumeBtn").disabled = false;
+}
+
+function wireQuizButtons(){
+  el("startBtn").addEventListener("click", () => {
+    const s = loadSettings();
+    newRun(Number(s.count), s.scope);
+    el("runReport").hidden = true;
+  });
+
+  el("resumeBtn").addEventListener("click", () => {
+    const run = loadRun();
+    if(!run) return;
+    renderQuestion(run);
+  });
+
+  el("resetRunBtn").addEventListener("click", () => {
+    if(confirm("현재 회차를 초기화할까요?")) resetCurrentRun();
+  });
+
+  el("skipBtn").addEventListener("click", () => markDontKnow());
+  el("finishBtn").addEventListener("click", () => finishRun());
+
+  el("showRunReportBtn").addEventListener("click", () => showRunReport());
+
+  el("exportRunBtn").addEventListener("click", () => {
+    const run = loadRun();
+    if(!run) return alert("저장된 회차가 없습니다.");
+    downloadJson(`${run.runId}.json`, run);
+  });
+
+  el("speakBtn").addEventListener("click", () => {
+    const run = loadRun();
+    if(!run) return;
+    const item = currentItem(run);
+    if(!item) return;
+    speakWord(item.word);
+  });
+
+  // ✅ 뜻(정답)을 클릭하면 다음 문제로 이동
+  el("revealMeaning").addEventListener("click", () => nextQuestion());
+}
+
+// =========================
+// Add words UI
+// =========================
+function wireAdd(){
+  el("addBtn").addEventListener("click", () => {
+    const text = (el("addInput").value || "").trim();
+    if(!text) return;
+
+    const pairs = parseAnyToPairs(text);
+    if(!pairs.length){
+      el("addResult").textContent = "형식을 인식하지 못했어요. CSV 또는 [\"word\",\"meaning\"] 형태로 넣어주세요.";
+      return;
+    }
+    const added = addPairsToDB(pairs, "manual");
+    el("addResult").textContent = `추가 완료: ${added}개 (중복 제외)`;
+  });
+
+  el("clearAddBtn").addEventListener("click", () => {
+    el("addInput").value = "";
+    el("addResult").textContent = "";
+  });
+}
+
+// =========================
+// Export / Import (backup)
+// =========================
+function wireBackup(){
+  el("exportWordsBtn").addEventListener("click", () => downloadJson("words-db.json", loadDB()));
+  el("exportWrongBtn").addEventListener("click", () => downloadJson("wrong-notes.json", loadWrong()));
+
+  el("exportAllBtn").addEventListener("click", () => {
+    const pack = {
+      exportedAt: now(),
+      db: loadDB(),
+      wrong: loadWrong(),
+      run: loadRun(),
+      settings: loadSettings()
+    };
+    downloadJson(`rwq-backup-${Date.now()}.json`, pack);
+  });
+
+  el("importFile").addEventListener("change", async (e) => {
+    const f = e.target.files?.[0];
+    if(!f) return;
+    try{
+      const text = await f.text();
+      const pack = JSON.parse(text);
+
+      if(pack.db?.items) saveDB(pack.db);
+      if(pack.wrong?.map) saveWrong(pack.wrong);
+      if(pack.run) saveRun(pack.run);
+      if(pack.settings) saveSettings(pack.settings);
+
+      refreshHeader();
+      renderWordList();
+      renderWrongList();
+      applySettingsToUI();
+
+      el("backupMsg").textContent = "복원 완료!";
+    }catch(err){
+      el("backupMsg").textContent = "복원 실패: JSON 형식이 올바른지 확인하세요.";
+    }finally{
+      e.target.value = "";
+    }
+  });
+
+  el("wipeWordsBtn").addEventListener("click", () => {
+    if(confirm("단어DB를 완전히 초기화할까요? (되돌릴 수 없음)")){
+      saveDB({version:1, items:[]});
+      refreshHeader();
+      renderWordList();
+      alert("단어DB 초기화 완료");
+    }
+  });
+
+  el("wipeWrongBtn").addEventListener("click", () => {
+    if(confirm("오답노트를 완전히 초기화할까요? (되돌릴 수 없음)")){
+      saveWrong({version:1, map:{}});
+      renderWrongList();
+      alert("오답노트 초기화 완료");
+    }
+  });
+}
+
+// =========================
+// Search wires
+// =========================
+function wireSearch(){
+  el("listSearch").addEventListener("input", () => renderWordList());
+  el("listFilter").addEventListener("change", () => renderWordList());
+
+  el("wrongSearch").addEventListener("input", () => renderWrongList());
+  el("wrongSort").addEventListener("change", () => renderWrongList());
+}
+
+// =========================
+// Service Worker register
+// =========================
+async function registerSW(){
+  if(!("serviceWorker" in navigator)) return;
+  try{
+    await navigator.serviceWorker.register("./sw.js");
+  }catch(e){
+    console.warn("SW register failed:", e);
+  }
+}
+
+// =========================
+// Init
+// =========================
+async function init(){
+  wireTabs();
+  initTTS();
+
+  // settings UI
+  applySettingsToUI();
+  wireSettings();
+
+  // seed if empty
+  await seedIfEmpty();
+
+  // render initial
+  refreshHeader();
+  renderWordList();
+  renderWrongList();
+
+  // restore run
+  const run = loadRun();
+  if(run){
+    updateRunUI(run);
+    el("resumeBtn").disabled = false;
+  }else{
+    el("finishBtn").disabled = true;
+  }
+
+  // wires
+  wireQuizButtons();
+  wireAdd();
+  wireBackup();
+  wireSearch();
+
+  // tts rate display
+  el("ttsRateVal").textContent = Number(loadSettings().ttsRate ?? 1.0).toFixed(2);
+
+  // PWA
+  await registerSW();
+}
+
+init();

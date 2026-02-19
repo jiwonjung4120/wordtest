@@ -1,0 +1,15 @@
+{
+  "name": "Random Word Quiz",
+  "short_name": "RWQ",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": [
+    {
+      "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAklEQVR4AewaftIAAAGbSURBVO3BQQ3CMBRF0b0gQWmQyQmQyQmQyQmQyQmQyQmQyQmQyQmQyQmQ2q7m3n0b8nKc0o8f0yq0Qkq1Jw7m8w3xQn0GQq+0m8u0a0y0xwY0wq3gB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqvYB0g1w4m8b8yqQY0n2z0g4wqu8BfVx2e1m1W8AAAAASUVORK5CYII=",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
