@@ -84,7 +84,7 @@ function clearRun(){
 
 function loadSettings(){
   const s = safeJsonParse(localStorage.getItem(KEY_SETTINGS), null);
-  return s || { ttsOn: true, ttsRate: 1.0, count: 100, scope: "all" };
+  return s || { ttsOn: true, ttsRate: 1.0, count: 100, scope: "all", quizMode: "en2ko" };
 }
 function saveSettings(s){
   localStorage.setItem(KEY_SETTINGS, JSON.stringify(s));
@@ -203,6 +203,7 @@ function wireTabs(){
 let ttsVoice = null;
 let ttsUnlocked = false;
 let autoNextTimer = null;
+let currentQ = null; // { mode, correctVal, word, meaning }
 
 function clearAutoNext(){
   if(autoNextTimer){
@@ -314,11 +315,21 @@ function buildQuestionPool(scope, count){
   return sample(base, count);
 }
 
-function pickChoices(correctItem, allItems){
-  // 4지선다: meaning 기준 (뜻 3개 랜덤 + 정답)
-  const correct = correctItem.meaning || "(뜻 없음)";
+function pickChoices(correctItem, allItems, field){
+  // 4지선다: field 기준(meaning 또는 word)
+  const f = field || "meaning";
+  const correctRaw = correctItem[f];
+  const correct = (correctRaw && String(correctRaw).trim())
+    ? String(correctRaw).trim()
+    : (f === "meaning" ? "(뜻 없음)" : "(단어 없음)");
+
   const pool = allItems.filter(x => lowerKey(x.word) !== lowerKey(correctItem.word));
-  const distractors = sample(pool, 3).map(x => x.meaning || "(뜻 없음)");
+  const distractors = sample(pool, 3).map(x => {
+    const v = x[f];
+    if(v && String(v).trim()) return String(v).trim();
+    return (f === "meaning" ? "(뜻 없음)" : "(단어 없음)");
+  });
+
   const options = [correct, ...distractors];
 
   // shuffle
@@ -387,6 +398,8 @@ function renderQuestion(run){
   clearReveal();
   const item = currentItem(run);
   const db = loadDB();
+  const settings = loadSettings();
+  const mode = settings.quizMode || "en2ko"; // en2ko | ko2en
 
   if(!item){
     el("qWord").textContent = "끝!";
@@ -396,19 +409,36 @@ function renderQuestion(run){
     return;
   }
 
-  el("qWord").textContent = item.word;
+  // 문제 프롬프트(화면에 보여줄 것)
+  const promptText = (mode === "ko2en") ? (item.meaning || "(뜻 없음)") : item.word;
+  el("qWord").textContent = promptText;
+
+  // 발음은 항상 영어 단어 기준
   speakWord(item.word);
 
-  const { options, correct } = pickChoices(item, db.items);
+  // ✅ 문제 텍스트를 누르면 다시듣기
+  const qEl = el("qWord");
+  qEl.style.cursor = "pointer";
+  qEl.title = "다시듣기";
+  qEl.onclick = () => speakWord(item.word);
+
+  // ✅ 다시듣기 버튼 텍스트(있으면)
+  if(el("speakBtn")) el("speakBtn").textContent = "다시듣기";
+
+  const choiceField = (mode === "ko2en") ? "word" : "meaning";
+  const { options, correct } = pickChoices(item, db.items, choiceField);
+
+  // 현재 문제 캐시(정답 판정용)
+  currentQ = { mode, correctVal: correct, word: item.word, meaning: (item.meaning || "(뜻 없음)"), tag: item.tag };
 
   const wrap = el("choices");
   wrap.innerHTML = "";
 
-  options.forEach((meaning, i) => {
+  options.forEach((opt, i) => {
     const btn = document.createElement("button");
     btn.className = "choice";
-    btn.innerHTML = `<span>${meaning}</span><span class="tag">${i+1}</span>`;
-    btn.addEventListener("click", () => chooseAnswer(meaning));
+    btn.innerHTML = `<span>${escapeHtml(opt)}</span><span class="tag">${i+1}</span>`;
+    btn.addEventListener("click", () => chooseAnswer(opt));
     wrap.appendChild(btn);
   });
 
@@ -416,30 +446,36 @@ function renderQuestion(run){
   updateRunUI(run);
 }
 
-function chooseAnswer(chosenMeaning){
+function chooseAnswer(chosen){
   const run = loadRun();
   if(!run) return;
 
   const item = currentItem(run);
   if(!item) return;
 
-  const correctMeaning = item.meaning || "(뜻 없음)";
-  const isCorrect = (normalizeWord(chosenMeaning) === normalizeWord(correctMeaning));
+  const settings = loadSettings();
+  const mode = currentQ?.mode || settings.quizMode || "en2ko";
+  const correctVal = currentQ?.correctVal ?? (mode === "ko2en" ? item.word : (item.meaning || "(뜻 없음)"));
 
-  // mark buttons
+  const isCorrect = (normalizeWord(chosen) === normalizeWord(correctVal));
+
+  // mark buttons (normalize 비교)
   document.querySelectorAll(".choice").forEach(btn => {
-    const txt = btn.textContent.replace(/\s*\d+\s*$/, "").trim();
-    if(txt === correctMeaning) btn.classList.add("correct");
-    if(txt === chosenMeaning && !isCorrect) btn.classList.add("wrong");
+    const raw = btn.textContent.replace(/\s*\d+\s*$/, "").trim();
+    if(normalizeWord(raw) === normalizeWord(correctVal)) btn.classList.add("correct");
+    if(normalizeWord(raw) === normalizeWord(chosen) && !isCorrect) btn.classList.add("wrong");
   });
   lockChoices();
+
+  const correctMeaning = item.meaning || "(뜻 없음)";
 
   run.answers.push({
     wordId: item.id,
     word: item.word,
     correctMeaning,
-    chosenMeaning,
+    chosenMeaning: chosen,          // 기존 키 유지(호환)
     isCorrect,
+    mode,
     ts: now()
   });
 
@@ -467,18 +503,18 @@ function chooseAnswer(chosenMeaning){
 
   saveRun(run);
 
-  // ✅ 요구사항: "뜻을 클릭하면 다음 단어로 자동"
-  // -> 정답/오답 보여주고, 뜻 버튼 누르면 nextQuestion()
+  // ✅ 정답/오답 박스에는 항상 (영어 + 뜻) 표시
+  const revealLine = `정답: ${item.word}  |  뜻: ${correctMeaning}`;
+
   setReveal(
     isCorrect,
-    correctMeaning,
+    revealLine,
     `${item.tag === "exam" ? "시험용" : "예문용"} · ${run.idx+1}/${run.countActual}`
   );
   updateRunUI(run);
   renderWrongList();
 
-  // ✅ 뜻(보기)을 선택하면 자동으로 다음 단어로 이동
-  // (정답/오답 표시가 잠깐 보이도록 아주 짧게 지연)
+  // ✅ 보기 선택 후 자동 다음 문제
   clearAutoNext();
   autoNextTimer = setTimeout(() => {
     autoNextTimer = null;
@@ -695,7 +731,11 @@ function applySettingsToUI(){
 
   el("ttsRate").value = String(s.ttsRate ?? 1.0);
   el("ttsRateVal").textContent = Number(s.ttsRate ?? 1.0).toFixed(2);
+
+  const modeSel = el("modeSelect");
+  if(modeSel) modeSel.value = s.quizMode || "en2ko";
 }
+
 
 function wireSettings(){
   document.querySelectorAll("#countSeg .segbtn").forEach(b => {
@@ -725,7 +765,17 @@ function wireSettings(){
     saveSettings(s);
     el("ttsRateVal").textContent = Number(s.ttsRate).toFixed(2);
   });
+
+  const modeSel = el("modeSelect");
+  if(modeSel){
+    modeSel.addEventListener("change", () => {
+      const s = loadSettings();
+      s.quizMode = modeSel.value;
+      saveSettings(s);
+    });
+  }
 }
+
 
 // =========================
 // Run UI

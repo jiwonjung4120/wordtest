@@ -172,7 +172,11 @@ textarea{min-height: 220px; resize: vertical}
 }
 .stat .k{color:var(--muted); font-size:12px}
 .stat .v{font-weight:800; font-size:18px; margin-top:3px}
-
+/* 회차 표시 개선 */
+#runId{
+  font-size:14px;
+  word-break:break-word;
+}
 .quizbox{
   border:1px solid rgba(34,50,83,.7);
   background: rgba(17,27,47,.55);
