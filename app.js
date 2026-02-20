@@ -10,6 +10,63 @@ const KEY_SETTINGS = "rwq_settings_v1";
 // Helpers
 // =========================
 const el = (id) => document.getElementById(id);
+
+let speakNowBtn = null;
+
+function ensureModeSelectUI(){
+  // index.html에 modeSelect가 없으면 app.js에서 자동으로 추가(호환성)
+  if (el('modeSelect')) return;
+  const scope = el('scopeSelect');
+  if (!scope) return;
+  const scopeRow = scope.closest('.row');
+  if (!scopeRow || !scopeRow.parentElement) return;
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.innerHTML = `
+    <label>퀴즈 모드</label>
+    <select id="modeSelect">
+      <option value="en2ko">영어 → 뜻</option>
+      <option value="ko2en">뜻 → 영어</option>
+    </select>
+  `.trim();
+
+  scopeRow.parentElement.insertBefore(row, scopeRow.nextSibling);
+}
+
+function ensureSpeakNowBtnUI(){
+  if (speakNowBtn) return;
+  const quizBox = el('quizBox');
+  const choices = el('choices');
+  if (!quizBox || !choices) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'revealMeta';
+  wrap.style.marginTop = '8px';
+  wrap.style.justifyContent = 'flex-end';
+
+  speakNowBtn = document.createElement('button');
+  speakNowBtn.id = 'speakNowBtn';
+  speakNowBtn.className = 'mini';
+  speakNowBtn.type = 'button';
+  speakNowBtn.textContent = '🔊 다시듣기';
+  speakNowBtn.addEventListener('click', () => {
+    if (!currentQ) return;
+    speakWord(currentQ.word);
+  });
+
+  wrap.appendChild(speakNowBtn);
+  quizBox.insertBefore(wrap, choices);
+
+  updateSpeakNowBtnUI();
+}
+
+function updateSpeakNowBtnUI(){
+  if (!speakNowBtn) return;
+  const enabled = !!currentQ;
+  speakNowBtn.disabled = !enabled;
+  speakNowBtn.style.opacity = enabled ? '1' : '0.45';
+}
 const now = () => new Date().toISOString();
 const uid = () => Math.random().toString(16).slice(2) + "-" + Date.now().toString(16);
 
@@ -361,6 +418,7 @@ function newRun(count, scope){
 
   saveRun(run);
   updateRunUI(run);
+  updateSpeakNowBtnUI();
   renderQuestion(run);
 }
 
@@ -958,6 +1016,10 @@ async function registerSW(){
 async function init(){
   wireTabs();
   initTTS();
+
+  // ensure UI parts (호환성)
+  ensureModeSelectUI();
+  ensureSpeakNowBtnUI();
 
   // settings UI
   applySettingsToUI();
