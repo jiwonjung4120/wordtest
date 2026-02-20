@@ -1,4 +1,4 @@
-const CACHE = "rwq-v2"; // ← 반드시 버전 올리기 (v1 -> v2)
+const CACHE = "rwq-v3";
 const ASSETS = [
   "./",
   "./index.html",
