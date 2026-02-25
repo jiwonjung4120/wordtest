@@ -1,4 +1,4 @@
-const CACHE = "rwq-v3";
+const CACHE = "rwq-v4";
 const ASSETS = [
   "./",
   "./index.html",
