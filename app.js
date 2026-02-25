@@ -63,7 +63,8 @@ function ensureSpeakNowBtnUI(){
 
 function updateSpeakNowBtnUI(){
   if (!speakNowBtn) return;
-  const enabled = !!currentQ;
+  const s = loadSettings();
+  const enabled = !!currentQ && (currentQ.mode !== "ko2en") && !!s.ttsOn;
   speakNowBtn.disabled = !enabled;
   speakNowBtn.style.opacity = enabled ? '1' : '0.45';
 }
@@ -460,6 +461,8 @@ function renderQuestion(run){
   const mode = settings.quizMode || "en2ko"; // en2ko | ko2en
 
   if(!item){
+    currentQ = null;
+    updateSpeakNowBtnUI();
     el("qWord").textContent = "끝!";
     el("choices").innerHTML = "";
     el("finishBtn").disabled = false;
@@ -471,23 +474,37 @@ function renderQuestion(run){
   const promptText = (mode === "ko2en") ? (item.meaning || "(뜻 없음)") : item.word;
   el("qWord").textContent = promptText;
 
-  // 발음은 항상 영어 단어 기준
-  speakWord(item.word);
-
-  // ✅ 문제 텍스트를 누르면 다시듣기
+  // TTS 동작:
+  // - en2ko(영어 → 뜻): 자동 발음 + 문제 텍스트 눌러서 다시듣기 가능
+  // - ko2en(뜻 → 영어): 발음 모드 OFF (자동/수동 모두 비활성)
   const qEl = el("qWord");
-  qEl.style.cursor = "pointer";
-  qEl.title = "다시듣기";
-  qEl.onclick = () => speakWord(item.word);
+  qEl.onclick = null;
+  qEl.style.cursor = "default";
+  qEl.title = "";
 
-  // ✅ 다시듣기 버튼 텍스트(있으면)
-  if(el("speakBtn")) el("speakBtn").textContent = "다시듣기";
+  const speakBtn = el("speakBtn");
+  if (speakBtn){
+    const off = (mode === "ko2en");
+    speakBtn.textContent = off ? "발음(OFF)" : "다시듣기";
+    speakBtn.disabled = off;
+    speakBtn.style.opacity = off ? "0.45" : "1";
+  }
+
+  if (mode !== "ko2en"){
+    speakWord(item.word);
+
+    // ✅ 문제 텍스트를 누르면 다시듣기
+    qEl.style.cursor = "pointer";
+    qEl.title = "다시듣기";
+    qEl.onclick = () => speakWord(item.word);
+  }
 
   const choiceField = (mode === "ko2en") ? "word" : "meaning";
   const { options, correct } = pickChoices(item, db.items, choiceField);
 
   // 현재 문제 캐시(정답 판정용)
   currentQ = { mode, correctVal: correct, word: item.word, meaning: (item.meaning || "(뜻 없음)"), tag: item.tag };
+  updateSpeakNowBtnUI();
 
   const wrap = el("choices");
   wrap.innerHTML = "";
@@ -611,6 +628,8 @@ function finishRun(){
 
 function resetCurrentRun(){
   clearRun();
+  currentQ = null;
+  updateSpeakNowBtnUI();
   updateRunUI(null);
   el("qWord").textContent = "시작을 누르세요";
   el("choices").innerHTML = "";
@@ -632,10 +651,14 @@ function showRunReport(){
 
   const rows = run.answers.map((a, idx) => {
     const ok = a.isCorrect;
+    const w = escapeHtml(a.word);
     return `
       <tr>
         <td>${idx+1}</td>
-        <td><b>${escapeHtml(a.word)}</b></td>
+        <td>
+          <span class="sayword" data-say="${w}" style="cursor:pointer; text-decoration:underline; font-weight:900;">${w}</span>
+          <button class="mini" type="button" title="발음" data-say="${w}" style="margin-left:8px;">🔊</button>
+        </td>
         <td>${escapeHtml(a.correctMeaning)}</td>
         <td>${escapeHtml(a.chosenMeaning)}</td>
         <td class="${ok ? "good" : "bad"}">${ok ? "O" : "X"}</td>
@@ -661,6 +684,14 @@ function showRunReport(){
       </table>
     </div>
   `;
+
+  // ✅ 결과표(결과보기)에서 단어를 클릭하면 발음
+  box.querySelectorAll("[data-say]").forEach((node) => {
+    node.addEventListener("click", () => {
+      unlockTTSOnce();
+      speakWord(node.dataset.say);
+    });
+  });
 }
 
 function escapeHtml(s){
