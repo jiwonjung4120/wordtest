@@ -6,6 +6,9 @@ const KEY_WRONG = "rwq_wrong_v1";     // wrong notes
 const KEY_RUN = "rwq_run_v1";         // current run state
 const KEY_SETTINGS = "rwq_settings_v1";
 
+// 앱/캐시 리비전 (SW/seed 캐시 무효화에 사용)
+const APP_REV = "v5";
+
 // =========================
 // Helpers
 // =========================
@@ -149,24 +152,105 @@ function saveSettings(s){
 }
 
 // =========================
-// Seed load (words.seed.json)
+// Seed sync (words.seed.json)
 // =========================
-async function seedIfEmpty(){
-  // ✅ 이제부터는 "비어있을 때만"이 아니라,
-  // seed를 매번 읽어서 DB에 없는 단어만 병합 추가한다.
+async function syncSeed(){
+  // seed를 매번 읽어서:
+  // 1) seed 단어는 DB에 upsert(뜻 변경 반영)
+  // 2) seed에서 삭제된 단어는 DB에서도 제거(단, source=seed 인 것만)
   try{
-    const resp = await fetch("./words.seed.json", { cache: "no-store" });
+    const resp = await fetch(`./words.seed.json?rev=${APP_REV}`, { cache: "no-store" });
     if(!resp.ok) throw new Error("seed fetch failed: " + resp.status);
 
     const js = await resp.json();
     const pairs = Array.isArray(js.pairs) ? js.pairs : [];
     if(!pairs.length) return;
 
-    const added = addPairsToDB(pairs, "seed");
-    console.log("Seed merged. added:", added);
+    const report = upsertSeedPairs(pairs);
+    console.log("Seed synced:", report);
   }catch(e){
-    console.warn("Seed load skipped:", e);
+    console.warn("Seed sync skipped:", e);
   }
+}
+
+function upsertSeedPairs(pairs){
+  const db = loadDB();
+
+  // 현재 seed key set
+  const seedMap = new Map(); // keyLower -> {word, meaning}
+  for(const p of pairs){
+    if(!Array.isArray(p) || p.length < 1) continue;
+    const word = normalizeWord(p[0]);
+    const meaning = normalizeWord(p[1] || "");
+    if(!word) continue;
+    seedMap.set(lowerKey(word), { word, meaning });
+  }
+
+  let added = 0, updated = 0, removed = 0;
+
+  // index for quick lookup
+  const idxByKey = new Map();
+  db.items.forEach((it, idx) => idxByKey.set(lowerKey(it.word), idx));
+
+  // add / update (seed source only)
+  for(const [k, v] of seedMap.entries()){
+    const idx = idxByKey.get(k);
+    if(idx === undefined){
+      db.items.push({
+        id: uid(),
+        word: v.word,
+        meaning: v.meaning,
+        tag: detectTag(v.word),
+        createdAt: now(),
+        source: "seed"
+      });
+      added++;
+    }else{
+      const it = db.items[idx];
+      // manual 단어는 건드리지 않음(사용자 수정 보호)
+      if(it.source === "seed"){
+        const nextWord = v.word;
+        const nextMeaning = v.meaning;
+        if(it.word !== nextWord || it.meaning !== nextMeaning){
+          it.word = nextWord;
+          it.meaning = nextMeaning;
+          it.tag = detectTag(nextWord);
+          updated++;
+        }
+      }
+    }
+  }
+
+  // remove: seed에서 사라진 단어는 DB에서도 제거 (source=seed만)
+  const beforeLen = db.items.length;
+  db.items = db.items.filter(it => {
+    if(it.source !== "seed") return true;
+    return seedMap.has(lowerKey(it.word));
+  });
+  removed = beforeLen - db.items.length;
+
+  // wrong note에서도 seed-삭제 단어 정리(오답노트가 남아보이는 문제 방지)
+  if(removed > 0){
+    const wrong = loadWrong();
+    let changedWrong = false;
+    for(const k of Object.keys(wrong.map || {})){
+      const entry = wrong.map[k];
+      const wordLower = lowerKey(entry?.word || k);
+      // DB에 없으면 삭제
+      if(!db.items.some(it => lowerKey(it.word) === wordLower)){
+        delete wrong.map[k];
+        changedWrong = true;
+      }
+    }
+    if(changedWrong) saveWrong(wrong);
+  }
+
+  saveDB(db);
+  refreshHeader();
+  renderWordList();
+  renderWrongList();
+
+  return { added, updated, removed, seedTotal: seedMap.size };
 }
 
 function addPairsToDB(pairs, source="manual"){
@@ -1035,7 +1119,16 @@ function wireSearch(){
 async function registerSW(){
   if(!("serviceWorker" in navigator)) return;
   try{
-    await navigator.serviceWorker.register("./sw.js");
+    // ✅ query 붙여서 브라우저가 sw.js를 '새 파일'로 인식하게 함(캐시 문제 완화)
+    const reg = await navigator.serviceWorker.register(`./sw.js?rev=${APP_REV}`);
+
+    // 가능하면 즉시 업데이트 체크
+    try{ await reg.update(); }catch{}
+
+    // 새 SW가 컨트롤러로 전환되면 자동 새로고침(업데이트 적용)
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      window.location.reload();
+    });
   }catch(e){
     console.warn("SW register failed:", e);
   }
@@ -1056,8 +1149,8 @@ async function init(){
   applySettingsToUI();
   wireSettings();
 
-  // seed if empty
-  await seedIfEmpty();
+  // seed sync
+  await syncSeed();
 
   // render initial
   refreshHeader();

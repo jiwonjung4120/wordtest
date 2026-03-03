@@ -51,3 +51,11 @@ self.addEventListener("fetch", (e) => {
     )
   );
 });
+
+
+// (선택) 클라이언트에서 SKIP_WAITING 메시지 보내면 즉시 활성화
+self.addEventListener("message", (event) => {
+  if(event.data && event.data.type === "SKIP_WAITING"){
+    self.skipWaiting();
+  }
+});
